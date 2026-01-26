@@ -138,6 +138,23 @@ func Index(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var prNumber int
+	var pullRequestBaseID int64
+	if len(event.GetWorkflowRun().PullRequests) > 0 {
+		pr := event.GetWorkflowRun().PullRequests[0]
+		pullRequestBaseID = pr.GetBase().GetRepo().GetID()
+		prNumber = pr.GetNumber()
+	} else {
+		log.Printf("No PR found in workflow_run event")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if event.GetRepo().GetID() != pullRequestBaseID {
+		log.Printf("Ignoring workflow run from forked repository: repo_id=%d, pr_base_repo_id=%d", event.GetRepo().GetID(), pullRequestBaseID)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	var allReports = []Report{
 		{
 			WorkflowName:  "CI",
@@ -187,15 +204,6 @@ func Index(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("Extracted report from artifacts")
-
-	var prNumber int
-	if len(event.WorkflowRun.PullRequests) > 0 {
-		prNumber = event.WorkflowRun.PullRequests[0].GetNumber()
-	} else {
-		log.Printf("No PR found in workflow_run event")
-		w.WriteHeader(http.StatusOK)
-		return
-	}
 
 	for _, report := range reports {
 		if report.Content == "" {
