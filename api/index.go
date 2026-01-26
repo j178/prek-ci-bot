@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -17,41 +16,27 @@ import (
 	"github.com/google/go-github/v81/github"
 )
 
-const (
-	workflowName     = "CI"
-	artifactPrefix   = "prek-cache"
-	artifactFilename = "report.txt"
-	prCommentMarker  = "<!-- special marker -->"
-)
-
 var (
 	ghAppID         = os.Getenv("GITHUB_APP_ID")
 	ghAppPrivateKey = os.Getenv("GITHUB_APP_PRIVATE_KEY")
 	ghWebhookSecret = os.Getenv("GITHUB_WEBHOOK_SECRET")
 )
 
-func findAndExtractReportFromArtifacts(ctx context.Context, client *github.Client, owner string, repo string, prefix string, runID int64) (string, error) {
-	artifacts, _, err := client.Actions.ListWorkflowRunArtifacts(ctx, owner, repo, runID, nil)
+type Report struct {
+	WorkflowName  string
+	ArtifactName  string
+	Filename      string
+	Content       string
+	CommentMarker string
+}
+
+func downloadAndExtractArtifact(ctx context.Context, client *github.Client, owner string, repo string, artifactID int64, artifactFilename string) (string, error) {
+	downloadURL, _, err := client.Actions.DownloadArtifact(ctx, owner, repo, artifactID, 0)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("error getting download URL for artifact ID %d: %v", artifactID, err)
 	}
-	log.Printf("Found %d artifacts for workflow run %d", len(artifacts.Artifacts), runID)
+	log.Printf("Downloading artifact ID %d from %s", artifactID, downloadURL.String())
 
-	var downloadURL *url.URL
-	for _, artifact := range artifacts.Artifacts {
-		if artifact.GetName() != "" && strings.HasPrefix(artifact.GetName(), prefix) {
-			downloadURL, _, err = client.Actions.DownloadArtifact(ctx, owner, repo, artifact.GetID(), 10)
-			if err != nil {
-				return "", err
-			}
-			break
-		}
-	}
-	if downloadURL == nil {
-		return "", fmt.Errorf("no artifact with prefix %s found", prefix)
-	}
-
-	log.Printf("Downloading artifact from %s", downloadURL.String())
 	resp, err := http.Get(downloadURL.String())
 	if err != nil {
 		return "", fmt.Errorf("error downloading artifact: %v", err)
@@ -64,18 +49,18 @@ func findAndExtractReportFromArtifacts(ctx context.Context, client *github.Clien
 	}
 	reader, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("error opening zip reader: %v", err)
 	}
 	for _, f := range reader.File {
 		if f.Name == artifactFilename {
 			file, err := f.Open()
 			if err != nil {
-				return "", err
+				return "", fmt.Errorf("error opening file %s in zip: %v", artifactFilename, err)
 			}
 			defer file.Close()
 			buf := new(bytes.Buffer)
 			if _, err := io.Copy(buf, file); err != nil {
-				return "", err
+				return "", fmt.Errorf("error reading file %s from zip: %v", artifactFilename, err)
 			}
 			return buf.String(), nil
 		}
@@ -83,19 +68,44 @@ func findAndExtractReportFromArtifacts(ctx context.Context, client *github.Clien
 	return "", fmt.Errorf("%s not found in zip", artifactFilename)
 }
 
-func upsertPRComment(ctx context.Context, client *github.Client, owner, repo string, prNumber int, report string) error {
+func findAndExtractReportFromArtifacts(ctx context.Context, client *github.Client, owner string, repo string, reports []Report, runID int64) error {
+	artifacts, _, err := client.Actions.ListWorkflowRunArtifacts(ctx, owner, repo, runID, nil)
+	if err != nil {
+		return fmt.Errorf("error listing artifacts: %v", err)
+	}
+	log.Printf("Found %d artifacts for workflow run %d", len(artifacts.Artifacts), runID)
+
+	for _, artifact := range artifacts.Artifacts {
+		for _, report := range reports {
+			if strings.HasSuffix(artifact.GetName(), report.ArtifactName) {
+				log.Printf("Found artifact %s (ID: %d)", artifact.GetName(), artifact.GetID())
+				content, err := downloadAndExtractArtifact(ctx, client, owner, repo, artifact.GetID(), report.Filename)
+				if err != nil {
+					log.Printf("Error downloading and extracting artifact %s: %v", artifact.GetName(), err)
+					continue
+				}
+				report.Content = content
+				break
+			}
+		}
+	}
+
+	return nil
+}
+
+func upsertPRComment(ctx context.Context, client *github.Client, owner, repo string, prNumber int, report *Report) error {
 	comments, _, err := client.Issues.ListComments(ctx, owner, repo, prNumber, nil)
 	if err != nil {
 		return err
 	}
 	var foundID int64
 	for _, c := range comments {
-		if c.Body != nil && strings.Contains(c.GetBody(), prCommentMarker) {
+		if c.Body != nil && strings.Contains(c.GetBody(), report.CommentMarker) {
 			foundID = c.GetID()
 			break
 		}
 	}
-	body := prCommentMarker + "\n" + report
+	body := report.CommentMarker + "\n" + report.Content
 	if foundID == 0 {
 		log.Printf("Creating new comment on PR #%d", prNumber)
 		_, _, err := client.Issues.CreateComment(ctx, owner, repo, prNumber, &github.IssueComment{Body: &body})
@@ -128,8 +138,29 @@ func Index(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if event.GetAction() != "completed" || event.GetWorkflowRun().GetName() != workflowName {
-		log.Printf("Ignoring webhook event: workflow_name=%s, action=%s", event.GetWorkflowRun().GetName(), event.GetAction())
+	var allReports = []Report{
+		{
+			WorkflowName:  "CI",
+			ArtifactName:  "bloat-check-results",
+			Filename:      "bloat-comparison.txt",
+			CommentMarker: "<!-- prek-bloat-check -->",
+		},
+	}
+
+	var reports []Report
+	workflowName := event.GetWorkflowRun().GetName()
+	for _, report := range allReports {
+		if report.WorkflowName == workflowName {
+			reports = append(reports, report)
+		}
+	}
+	if len(reports) == 0 {
+		log.Printf("Ignoring webhook event: workflow_nam= %s", workflowName)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if event.GetAction() != "completed" {
+		log.Printf("Ignoring webhook event: action=%s", event.GetAction())
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -154,7 +185,7 @@ func Index(w http.ResponseWriter, r *http.Request) {
 
 	owner := event.Repo.Owner.GetLogin()
 	repo := event.Repo.GetName()
-	report, err := findAndExtractReportFromArtifacts(ctx, client, owner, repo, artifactPrefix, event.WorkflowRun.GetID())
+	err = findAndExtractReportFromArtifacts(ctx, client, owner, repo, reports, event.WorkflowRun.GetID())
 	if err != nil {
 		log.Printf("Error extracting artifacts error: %v", err)
 		w.WriteHeader(http.StatusOK)
@@ -171,10 +202,17 @@ func Index(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := upsertPRComment(ctx, client, owner, repo, prNumber, report); err != nil {
-		log.Printf("Error upserting PR comment: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+	for _, report := range reports {
+		if report.Content == "" {
+			log.Printf("No content found for report: workflow_name=%s, artifact_name=%s", report.WorkflowName, report.ArtifactName)
+			continue
+		}
+		log.Printf("Upserting comment for PR #%d, workflow_name=%s", prNumber, report.WorkflowName)
+		if err := upsertPRComment(ctx, client, owner, repo, prNumber, &report); err != nil {
+			log.Printf("Error upserting PR comment: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
