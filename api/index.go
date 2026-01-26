@@ -52,23 +52,23 @@ func downloadAndExtractArtifact(ctx context.Context, client *github.Client, owne
 		return "", fmt.Errorf("error opening zip reader: %v", err)
 	}
 	for _, f := range reader.File {
-		if f.Name == artifactFilename {
+		if strings.HasSuffix(f.Name, artifactFilename) {
 			file, err := f.Open()
 			if err != nil {
 				return "", fmt.Errorf("error opening file %s in zip: %v", artifactFilename, err)
 			}
 			defer file.Close()
-			buf := new(bytes.Buffer)
-			if _, err := io.Copy(buf, file); err != nil {
+			content, err := io.ReadAll(file)
+			if err != nil {
 				return "", fmt.Errorf("error reading file %s from zip: %v", artifactFilename, err)
 			}
-			return buf.String(), nil
+			return string(content), nil
 		}
 	}
 	return "", fmt.Errorf("%s not found in zip", artifactFilename)
 }
 
-func findAndExtractReportFromArtifacts(ctx context.Context, client *github.Client, owner string, repo string, reports []Report, runID int64) error {
+func findAndExtractReportFromArtifacts(ctx context.Context, client *github.Client, owner string, repo string, reports []*Report, runID int64) error {
 	artifacts, _, err := client.Actions.ListWorkflowRunArtifacts(ctx, owner, repo, runID, nil)
 	if err != nil {
 		return fmt.Errorf("error listing artifacts: %v", err)
@@ -77,7 +77,7 @@ func findAndExtractReportFromArtifacts(ctx context.Context, client *github.Clien
 
 	for _, artifact := range artifacts.Artifacts {
 		for _, report := range reports {
-			if strings.HasSuffix(artifact.GetName(), report.ArtifactName) {
+			if artifact.GetName() == report.ArtifactName {
 				log.Printf("Found artifact %s (ID: %d)", artifact.GetName(), artifact.GetID())
 				content, err := downloadAndExtractArtifact(ctx, client, owner, repo, artifact.GetID(), report.Filename)
 				if err != nil {
@@ -147,20 +147,15 @@ func Index(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	var reports []Report
+	var reports []*Report
 	workflowName := event.GetWorkflowRun().GetName()
 	for _, report := range allReports {
 		if report.WorkflowName == workflowName {
-			reports = append(reports, report)
+			reports = append(reports, &report)
 		}
 	}
-	if len(reports) == 0 {
-		log.Printf("Ignoring webhook event: workflow_nam= %s", workflowName)
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	if event.GetAction() != "completed" {
-		log.Printf("Ignoring webhook event: action=%s", event.GetAction())
+	if event.GetAction() != "completed" || len(reports) == 0 {
+		log.Printf("Ignoring webhook event: action=%s, workflow=%s", event.GetAction(), workflowName)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -208,7 +203,7 @@ func Index(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		log.Printf("Upserting comment for PR #%d, workflow_name=%s", prNumber, report.WorkflowName)
-		if err := upsertPRComment(ctx, client, owner, repo, prNumber, &report); err != nil {
+		if err := upsertPRComment(ctx, client, owner, repo, prNumber, report); err != nil {
 			log.Printf("Error upserting PR comment: %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
