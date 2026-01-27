@@ -129,17 +129,6 @@ func githubClient(installationID int64) (*github.Client, error) {
 	return client, nil
 }
 
-func getPullRequestFromCommit(ctx context.Context, client *github.Client, owner, repo, sha string) (*github.PullRequest, error) {
-	prs, _, err := client.PullRequests.ListPullRequestsWithCommit(ctx, owner, repo, sha, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error listing PRs for commit %s: %v", sha, err)
-	}
-	if len(prs) == 0 {
-		return nil, fmt.Errorf("no PR found for commit %s", sha)
-	}
-	return prs[0], nil
-}
-
 // getPullRequestByHeadSHA finds an open PR whose head SHA matches the given SHA.
 func getPullRequestByHeadSHA(ctx context.Context, client *github.Client, owner, repo, sha string) (*github.PullRequest, error) {
 	prs, _, err := client.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{State: "open"})
