@@ -116,6 +116,19 @@ func upsertPRComment(ctx context.Context, client *github.Client, owner, repo str
 	return err
 }
 
+func githubClient(installationID int64) (*github.Client, error) {
+	appID, err := strconv.ParseInt(ghAppID, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid GITHUB_APP_ID: %v", err)
+	}
+	tr, err := ghinstallation.New(http.DefaultTransport, appID, installationID, []byte(ghAppPrivateKey))
+	if err != nil {
+		return nil, fmt.Errorf("error creating ghinstallation transport: %v", err)
+	}
+	client := github.NewClient(&http.Client{Transport: tr})
+	return client, nil
+}
+
 func getPullRequestFromCommit(ctx context.Context, client *github.Client, owner, repo, sha string) (*github.PullRequest, error) {
 	prs, _, err := client.PullRequests.ListPullRequestsWithCommit(ctx, owner, repo, sha, nil)
 	if err != nil {
@@ -125,6 +138,20 @@ func getPullRequestFromCommit(ctx context.Context, client *github.Client, owner,
 		return nil, fmt.Errorf("no PR found for commit %s", sha)
 	}
 	return prs[0], nil
+}
+
+// getPullRequestByHeadSHA finds an open PR whose head SHA matches the given SHA.
+func getPullRequestByHeadSHA(ctx context.Context, client *github.Client, owner, repo, sha string) (*github.PullRequest, error) {
+	prs, _, err := client.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{State: "open"})
+	if err != nil {
+		return nil, fmt.Errorf("error listing open PRs: %v", err)
+	}
+	for _, candidate := range prs {
+		if candidate.Head.GetSHA() == sha {
+			return candidate, nil
+		}
+	}
+	return nil, fmt.Errorf("no matching PR found for head SHA %s", sha)
 }
 
 func Index(w http.ResponseWriter, r *http.Request) {
@@ -149,23 +176,23 @@ func Index(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	log.Printf("Received workflow run event: workflow=%s, action=%s, run_id=%d", event.WorkflowRun.GetName(), event.GetAction(), event.WorkflowRun.GetID())
+
+	if event.GetAction() != "completed" {
+		log.Printf("Ignoring workflow run event: workflow=%s, action=%s", event.WorkflowRun.GetName(), event.GetAction())
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	client, err := githubClient(event.GetInstallation().GetID())
+	if err != nil {
+		log.Printf("Error creating GitHub client: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	owner := event.Repo.Owner.GetLogin()
 	repo := event.Repo.GetName()
-
-	appID, err := strconv.ParseInt(ghAppID, 10, 64)
-	if err != nil {
-		log.Printf("Invalid GITHUB_APP_ID: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	installationID := event.GetInstallation().GetID()
-	tr, err := ghinstallation.New(http.DefaultTransport, appID, installationID, []byte(ghAppPrivateKey))
-	if err != nil {
-		log.Printf("Error creating ghinstallation transport: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	client := github.NewClient(&http.Client{Transport: tr})
 
 	var prNumber int
 	var prBaseRepoID int64
@@ -174,7 +201,8 @@ func Index(w http.ResponseWriter, r *http.Request) {
 		prBaseRepoID = pr.Base.Repo.GetID()
 		prNumber = pr.GetNumber()
 	} else {
-		pr, err := getPullRequestFromCommit(ctx, client, owner, repo, event.WorkflowRun.GetHeadSHA())
+		// For PR from forks, `workflow_run.pull_requests` is empty. Try to find the PR by matching the head SHA.
+		pr, err := getPullRequestByHeadSHA(ctx, client, owner, repo, event.WorkflowRun.GetHeadSHA())
 		if err != nil {
 			log.Printf("Error finding PR for commit %s: %v", event.WorkflowRun.GetHeadSHA(), err)
 			w.WriteHeader(http.StatusOK)
@@ -206,7 +234,7 @@ func Index(w http.ResponseWriter, r *http.Request) {
 			reports = append(reports, &report)
 		}
 	}
-	if event.GetAction() != "completed" || len(reports) == 0 {
+	if len(reports) == 0 {
 		log.Printf("Ignoring webhook event: action=%s, workflow=%s", event.GetAction(), workflowName)
 		w.WriteHeader(http.StatusOK)
 		return
