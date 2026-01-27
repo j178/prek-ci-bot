@@ -116,7 +116,19 @@ func upsertPRComment(ctx context.Context, client *github.Client, owner, repo str
 	return err
 }
 
+func getPullRequestFromCommit(ctx context.Context, client *github.Client, owner, repo, sha string) (*github.PullRequest, error) {
+	prs, _, err := client.PullRequests.ListPullRequestsWithCommit(ctx, owner, repo, sha, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error listing PRs for commit %s: %v", sha, err)
+	}
+	if len(prs) == 0 {
+		return nil, fmt.Errorf("no PR found for commit %s", sha)
+	}
+	return prs[0], nil
+}
+
 func Index(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	payload, err := github.ValidatePayload(r, []byte(ghWebhookSecret))
 	if err != nil {
 		log.Printf("Error validating webhook signature: %v", err)
@@ -137,6 +149,23 @@ func Index(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	owner := event.Repo.Owner.GetLogin()
+	repo := event.Repo.GetName()
+
+	appID, err := strconv.ParseInt(ghAppID, 10, 64)
+	if err != nil {
+		log.Printf("Invalid GITHUB_APP_ID: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	installationID := event.GetInstallation().GetID()
+	tr, err := ghinstallation.New(http.DefaultTransport, appID, installationID, []byte(ghAppPrivateKey))
+	if err != nil {
+		log.Printf("Error creating ghinstallation transport: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	client := github.NewClient(&http.Client{Transport: tr})
 
 	var prNumber int
 	var prBaseRepoID int64
@@ -145,9 +174,15 @@ func Index(w http.ResponseWriter, r *http.Request) {
 		prBaseRepoID = pr.Base.Repo.GetID()
 		prNumber = pr.GetNumber()
 	} else {
-		log.Printf("No PR found in workflow_run event")
-		w.WriteHeader(http.StatusOK)
-		return
+		pr, err := getPullRequestFromCommit(ctx, client, owner, repo, event.WorkflowRun.GetHeadSHA())
+		if err != nil {
+			log.Printf("Error finding PR for commit %s: %v", event.WorkflowRun.GetHeadSHA(), err)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		log.Printf("Found PR #%d for commit %s", pr.GetNumber(), event.WorkflowRun.GetHeadSHA())
+		prBaseRepoID = pr.Base.Repo.GetID()
+		prNumber = pr.GetNumber()
 	}
 	if event.Repo.GetID() != prBaseRepoID {
 		log.Printf("Ignoring workflow run from forked repository: repo_id=%d, pr_base_repo_id=%d", event.Repo.GetID(), prBaseRepoID)
@@ -178,25 +213,7 @@ func Index(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("Workflow job completed: run_id=%d, workflow_name=%s", event.WorkflowRun.GetID(), event.WorkflowRun.GetName())
-	ctx := context.Background()
 
-	appID, err := strconv.ParseInt(ghAppID, 10, 64)
-	if err != nil {
-		log.Printf("Invalid GITHUB_APP_ID: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	installationID := event.GetInstallation().GetID()
-	tr, err := ghinstallation.New(http.DefaultTransport, appID, installationID, []byte(ghAppPrivateKey))
-	if err != nil {
-		log.Printf("Error creating ghinstallation transport: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	client := github.NewClient(&http.Client{Transport: tr})
-
-	owner := event.Repo.Owner.GetLogin()
-	repo := event.Repo.GetName()
 	err = findAndExtractReportFromArtifacts(ctx, client, owner, repo, reports, event.WorkflowRun.GetID())
 	if err != nil {
 		log.Printf("Error extracting artifacts error: %v", err)
