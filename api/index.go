@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v81/github"
+	"github.com/j178/ghinstallation/v2"
 )
 
 var (
