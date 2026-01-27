@@ -139,18 +139,18 @@ func Index(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var prNumber int
-	var pullRequestBaseID int64
-	if len(event.GetWorkflowRun().PullRequests) > 0 {
-		pr := event.GetWorkflowRun().PullRequests[0]
-		pullRequestBaseID = pr.GetBase().GetRepo().GetID()
+	var prBaseRepoID int64
+	if len(event.WorkflowRun.PullRequests) > 0 {
+		pr := event.WorkflowRun.PullRequests[0]
+		prBaseRepoID = pr.Base.Repo.GetID()
 		prNumber = pr.GetNumber()
 	} else {
 		log.Printf("No PR found in workflow_run event")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	if event.GetRepo().GetID() != pullRequestBaseID {
-		log.Printf("Ignoring workflow run from forked repository: repo_id=%d, pr_base_repo_id=%d", event.GetRepo().GetID(), pullRequestBaseID)
+	if event.Repo.GetID() != prBaseRepoID {
+		log.Printf("Ignoring workflow run from forked repository: repo_id=%d, pr_base_repo_id=%d", event.Repo.GetID(), prBaseRepoID)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -165,7 +165,7 @@ func Index(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var reports []*Report
-	workflowName := event.GetWorkflowRun().GetName()
+	workflowName := event.WorkflowRun.GetName()
 	for _, report := range allReports {
 		if report.WorkflowName == workflowName {
 			reports = append(reports, &report)
