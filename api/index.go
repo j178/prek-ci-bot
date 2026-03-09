@@ -214,6 +214,12 @@ func Index(w http.ResponseWriter, r *http.Request) {
 			Filename:      "bloat-comparison.txt",
 			CommentMarker: "<!-- prek-bloat-check -->",
 		},
+		{
+			WorkflowName:  "CI",
+			ArtifactName:  "hyperfine-benchmark-results",
+			Filename:      "hyperfine-benchmark.md",
+			CommentMarker: "<!-- prek-hyperfine-benchmark -->",
+		},
 	}
 
 	var reports []*Report
